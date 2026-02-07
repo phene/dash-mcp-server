@@ -1,13 +1,45 @@
+import asyncio
 from typing import Optional
 import httpx
 import subprocess
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
 
 mcp = FastMCP("Dash Documentation API")
+
+# Ports allowed for fetch_documentation_url: API port (from working_api_base_url) and ports seen in load_url from search_documentation.
+_allowed_documentation_ports: set[int] = set()
+_allowed_ports_lock = asyncio.Lock()
+
+
+def _port_from_url(url: str) -> Optional[int]:
+    """Return port from URL, or default 80/443 if absent. Returns None if parse fails or host is not localhost."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        host = (parsed.hostname or "").lower()
+        if host not in ("127.0.0.1", "localhost"):
+            return None
+        if parsed.port is not None:
+            return parsed.port
+        return 443 if parsed.scheme == "https" else 80
+    except Exception:
+        return None
+
+
+async def _add_allowed_port(port: int) -> None:
+    async with _allowed_ports_lock:
+        _allowed_documentation_ports.add(port)
+
+
+async def _is_port_allowed_for_fetch(port: int) -> bool:
+    async with _allowed_ports_lock:
+        return port in _allowed_documentation_ports
 
 
 async def check_api_health(ctx: Context, port: int) -> bool:
@@ -59,6 +91,7 @@ async def working_api_base_url(ctx: Context) -> Optional[str]:
             await ctx.error("Failed to enable Dash API Server automatically. Please enable it manually in Dash Settings > Integration")
             return None
     
+    await _add_allowed_port(port)
     return f"http://127.0.0.1:{port}"
 
 
@@ -306,6 +339,14 @@ async def search_documentation(
         # Filter out empty dict entries (Dash API returns [{}] for no results)
         results = [r for r in results if r]
 
+        # Record ports from load_url so fetch_documentation_url can allow them
+        for item in results:
+            load_url = item.get("load_url")
+            if load_url:
+                port = _port_from_url(load_url)
+                if port is not None:
+                    await _add_allowed_port(port)
+
         if not results and ' ' in query:
             return SearchResults(results=[], error="Nothing found. Try to search for fewer terms.")
 
@@ -373,24 +414,24 @@ async def search_documentation(
 async def fetch_documentation_url(ctx: Context, url: str) -> FetchResult:
     """
     Fetch the content of a documentation URL. The URL should be a load_url from search_documentation results.
-    Only URLs under the Dash API base (discovered from Dash's status) are allowed. Very large pages are returned as-is.
+    Only localhost URLs are allowed, and only on ports that have been seen: the Dash API port (from any successful API call) and ports found in load_url values from search_documentation. Call search_documentation first so load_url ports are whitelisted. Very large pages are returned as-is.
     """
     url = url.strip()
     if not url:
         await ctx.error("URL cannot be empty")
         return FetchResult(error="URL cannot be empty")
 
-    base_url = await working_api_base_url(ctx)
-    if base_url is None:
-        await ctx.error("Failed to connect to Dash API Server")
+    port = _port_from_url(url)
+    if port is None:
+        await ctx.error("URL must be http or https and point to localhost (127.0.0.1 or localhost)")
         return FetchResult(
-            error="Failed to connect to Dash API Server. Please ensure Dash is running and the API server is enabled (in Dash Settings > Integration)."
+            error="URL must be http or https and host must be 127.0.0.1 or localhost."
         )
 
-    if url != base_url and not url.startswith(base_url + "/"):
-        await ctx.error(f"URL must start with the Dash API base ({base_url})")
+    if not await _is_port_allowed_for_fetch(port):
+        await ctx.error(f"Port {port} is not in the allowlist. Use search_documentation first so load_url ports are recorded.")
         return FetchResult(
-            error=f"URL must start with the Dash API base ({base_url}). Only load_url values from search_documentation are allowed."
+            error=f"Port {port} is not allowed. Only ports from the Dash API and from load_url values returned by search_documentation are allowed. Run search_documentation first, then use a load_url from its results here."
         )
 
     try:
