@@ -169,6 +169,12 @@ class SearchResults(BaseModel):
     error: Optional[str] = Field(description="Error message if there was an issue", default=None)
 
 
+class FetchResult(BaseModel):
+    """Result from fetching a documentation URL (used by fetch_documentation_url)."""
+    content: str = Field(description="Response body as text", default="")
+    error: Optional[str] = Field(description="Error message if validation or fetch failed", default=None)
+
+
 def estimate_tokens(obj) -> int:
     """Estimate token count for a serialized object. Rough approximation: 1 token ≈ 4 characters."""
     if isinstance(obj, str):
@@ -361,6 +367,46 @@ async def search_documentation(
     except Exception as e:
         await ctx.error(f"Search failed: {e}")
         return SearchResults(error=f"Search failed: {e}. Please ensure Dash is running and the API server is enabled (in Dash Settings > Integration).")
+
+
+@mcp.tool()
+async def fetch_documentation_url(ctx: Context, url: str) -> FetchResult:
+    """
+    Fetch the content of a documentation URL. The URL should be a load_url from search_documentation results.
+    Only URLs under the Dash API base (discovered from Dash's status) are allowed. Very large pages are returned as-is.
+    """
+    url = url.strip()
+    if not url:
+        await ctx.error("URL cannot be empty")
+        return FetchResult(error="URL cannot be empty")
+
+    base_url = await working_api_base_url(ctx)
+    if base_url is None:
+        await ctx.error("Failed to connect to Dash API Server")
+        return FetchResult(
+            error="Failed to connect to Dash API Server. Please ensure Dash is running and the API server is enabled (in Dash Settings > Integration)."
+        )
+
+    if url != base_url and not url.startswith(base_url + "/"):
+        await ctx.error(f"URL must start with the Dash API base ({base_url})")
+        return FetchResult(
+            error=f"URL must start with the Dash API base ({base_url}). Only load_url values from search_documentation are allowed."
+        )
+
+    try:
+        await ctx.debug(f"Fetching documentation URL: {url}")
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            content = response.text
+        await ctx.info("Fetched documentation content successfully")
+        return FetchResult(content=content)
+    except httpx.HTTPStatusError as e:
+        await ctx.error(f"HTTP error fetching URL: {e}")
+        return FetchResult(error=f"HTTP error: {e}")
+    except Exception as e:
+        await ctx.error(f"Failed to fetch URL: {e}")
+        return FetchResult(error=f"Failed to fetch URL: {e}")
 
 
 @mcp.tool()

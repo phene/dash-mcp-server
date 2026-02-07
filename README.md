@@ -26,7 +26,9 @@ This is a work in progress. Any suggestions are welcome!
    - Lists all installed documentation sets in Dash
 2. **search_documentation**
    - Searches across docsets and snippets
-3. **enable_docset_fts**
+3. **fetch_documentation_url**
+   - Fetches documentation content from a load_url returned by search_documentation; only Dash API URLs (discovered port) are allowed
+4. **enable_docset_fts**
    - Enables full-text search for a specific docset
 
 ## Requirements
